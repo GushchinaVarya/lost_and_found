@@ -13,6 +13,8 @@ logger = logging.getLogger(__name__)
 
 LOST_ITEMS_FILE = "lost_items.csv"
 FOUND_ITEMS_FILE = "found_items.csv"
+LOST_ARCHIVE_FILE = "lost_items_archive.csv"
+FOUND_ARCHIVE_FILE = "found_items_archive.csv"
 UNIQUE_USERS_FILE = "unique_users.csv"
 UNIQUE_USERS_FIELDS = ["user_id", "username", "first_seen"]
 
@@ -272,6 +274,63 @@ def update_lost_item_match(lost_item_id: int, found_item_id: int):
 def update_found_item_match(found_item_id: int, lost_item_id: int):
     """Set is_matched on a found item to the matching lost item's ID."""
     _update_match(FOUND_ITEMS_FILE, FOUND_ITEMS_FIELDS, found_item_id, lost_item_id)
+
+
+def get_user_lost_items(user_id: int) -> list[dict]:
+    """Get all active lost items belonging to a specific user."""
+    rows = _read_all_rows(LOST_ITEMS_FILE, LOST_ITEMS_FIELDS)
+    return [r for r in rows if str(r.get("user_id")) == str(user_id)]
+
+
+def get_user_found_items(user_id: int) -> list[dict]:
+    """Get all active found items belonging to a specific user."""
+    rows = _read_all_rows(FOUND_ITEMS_FILE, FOUND_ITEMS_FIELDS)
+    return [r for r in rows if str(r.get("user_id")) == str(user_id)]
+
+
+def _archive_item(active_file: str, archive_file: str, fields: list[str], item_id: int) -> bool:
+    """Move an item from the active CSV to the archive CSV. Returns True on success."""
+    rows = _read_all_rows(active_file, fields)
+    item_to_archive = None
+    remaining = []
+    for row in rows:
+        if str(row.get("id")) == str(item_id):
+            item_to_archive = row
+        else:
+            remaining.append(row)
+
+    if not item_to_archive:
+        logger.warning("[DB] archive: item #%d not found in %s", item_id, active_file)
+        return False
+
+    try:
+        archive_exists = os.path.exists(archive_file) and os.path.getsize(archive_file) > 0
+        with open(archive_file, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            if not archive_exists:
+                writer.writeheader()
+            writer.writerow(item_to_archive)
+
+        with open(active_file, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(remaining)
+
+        logger.info("[DB] Archived item #%d from %s to %s", item_id, active_file, archive_file)
+        return True
+    except Exception:
+        logger.exception("[DB] Failed to archive item #%d from %s", item_id, active_file)
+        return False
+
+
+def archive_lost_item(item_id: int) -> bool:
+    """Move a lost item from active list to archive."""
+    return _archive_item(LOST_ITEMS_FILE, LOST_ARCHIVE_FILE, LOST_ITEMS_FIELDS, item_id)
+
+
+def archive_found_item(item_id: int) -> bool:
+    """Move a found item from active list to archive."""
+    return _archive_item(FOUND_ITEMS_FILE, FOUND_ARCHIVE_FILE, FOUND_ITEMS_FIELDS, item_id)
 
 
 init_database()

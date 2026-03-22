@@ -785,6 +785,108 @@ async def handle_found_owner_response(update: Update, context: ContextTypes.DEFA
         )
 
 
+async def show_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the user's reported items one by one with delete/keep options."""
+    user_id = update.effective_user.id
+    logger.info("[SHOW] %s requested their item list", _user_tag(update))
+
+    lost = database.get_user_lost_items(user_id)
+    found = database.get_user_found_items(user_id)
+
+    items = [("lost", i) for i in lost] + [("found", i) for i in found]
+
+    if not items:
+        await update.message.reply_text("📭 You don't have any reported items.")
+        return
+
+    context.user_data['_show_items'] = items
+    context.user_data['_show_index'] = 0
+
+    await _show_next_user_item(update.message, context)
+
+
+async def _show_next_user_item(target, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Display the next item from the user's show-list."""
+    items = context.user_data.get('_show_items', [])
+    index = context.user_data.get('_show_index', 0)
+
+    if index >= len(items):
+        await target.reply_text(
+            "📋 That's all your items!\n"
+            "Use /start to report a new item."
+        )
+        context.user_data.pop('_show_items', None)
+        context.user_data.pop('_show_index', None)
+        return
+
+    item_type, item = items[index]
+    item_id = item['id']
+
+    type_label = "🔍 Lost" if item_type == "lost" else "📦 Found"
+    matched = item.get('is_matched', 'false')
+    status = "✅ Matched" if matched != "false" else "🔎 Searching"
+
+    text = (
+        f"*{type_label} Item* ({index + 1}/{len(items)})\n\n"
+        f"*ID:* #{item_id}\n"
+        f"*Category:* {item.get('category', 'N/A')}\n"
+        f"*Description:* {item.get('description', 'N/A')}\n"
+        f"*Status:* {status}\n"
+        f"*Date:* {item.get('created_at', 'N/A')[:10]}"
+    )
+
+    if item_type == "lost" and item.get('reward'):
+        text += f"\n*Reward:* {item['reward']}"
+
+    keyboard = [[
+        InlineKeyboardButton("🗑 Delete", callback_data=f"show_del_{item_type}_{item_id}"),
+        InlineKeyboardButton("➡️ Keep", callback_data=f"show_keep_{item_type}_{item_id}"),
+    ]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    photo_id = item.get('photo_file_id', '')
+    if photo_id:
+        await target.reply_photo(
+            photo=photo_id,
+            caption=text,
+            reply_markup=reply_markup,
+            parse_mode='Markdown'
+        )
+    else:
+        await target.reply_text(text, reply_markup=reply_markup, parse_mode='Markdown')
+
+
+async def handle_show_response(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle delete/keep response for the /show flow."""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    parts = data.split("_")
+    action = parts[1]
+    item_type = parts[2]
+    item_id = int(parts[3])
+
+    logger.info("[SHOW] %s action='%s' on %s item #%d",
+                _user_tag(update), action, item_type, item_id)
+
+    await query.edit_message_reply_markup(reply_markup=None)
+
+    if action == "del":
+        if item_type == "lost":
+            ok = database.archive_lost_item(item_id)
+        else:
+            ok = database.archive_found_item(item_id)
+
+        if ok:
+            await query.message.reply_text(f"🗑 Item #{item_id} has been deleted and archived.")
+        else:
+            await query.message.reply_text(f"⚠️ Could not delete item #{item_id}.")
+
+    context.user_data['_show_index'] = context.user_data.get('_show_index', 0) + 1
+    await _show_next_user_item(query.message, context)
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Cancel the conversation."""
     logger.info("[CANCEL] %s cancelled the conversation", _user_tag(update))
@@ -806,6 +908,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🆘 *Lost & Found Bot Help*\n\n"
         "*Commands:*\n"
         "/start - Start reporting a lost or found item\n"
+        "/show - View and manage your reported items\n"
         "/cancel - Cancel current report\n"
         "/help - Show this help message\n\n"
         "*How it works:*\n"
@@ -864,12 +967,17 @@ def main() -> None:
     # Add handlers
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("show", show_command))
     application.add_handler(
         CallbackQueryHandler(handle_owner_response, pattern="^owner_(yes|no|unsure)_"),
         group=1
     )
     application.add_handler(
         CallbackQueryHandler(handle_found_owner_response, pattern="^fowner_(yes|no|unsure)_"),
+        group=1
+    )
+    application.add_handler(
+        CallbackQueryHandler(handle_show_response, pattern="^show_(del|keep)_"),
         group=1
     )
     
